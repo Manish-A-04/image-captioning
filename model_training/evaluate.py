@@ -6,7 +6,6 @@ from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from rouge_score import rouge_scorer
 
 from model import ImageCaptioningModel
-from inference import generate_caption
 from dataloader import get_test_dataloader
 
 try:
@@ -16,33 +15,12 @@ except ImportError:
     USE_TQDM = False
 
 
-def decode_ids(token_ids, idx2word, special_tokens={'<PAD>', '<SOS>', '<EOS>'}):
-    tokens = []
-    for tid in token_ids:
-        word = idx2word.get(str(tid), '<UNK>')
-        if word == '<EOS>':
-            break
-        if word not in special_tokens:
-            tokens.append(word)
-    return tokens
-
-
 def evaluate(config):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    with open(config['vocab_path'], 'r') as f:
-        vocab = json.load(f)
-
-    idx2word = {str(v): k for k, v in vocab.items()}
-
     model = ImageCaptioningModel(
-        vocab_size=len(vocab),
-        embed_dim=config.get('embed_dim', 256),
-        num_heads=config.get('num_heads', 8),
-        num_layers=config.get('num_layers', 3),
-        ff_dim=config.get('ff_dim', 512),
-        max_len=config.get('max_len', 128),
-        dropout=0.0
+        encoder_name=config.get('encoder_name', "google/vit-base-patch16-224-in21k"),
+        decoder_name=config.get('decoder_name', "gpt2")
     ).to(device)
 
     checkpoint = torch.load(config['checkpoint_path'], map_location=device)
@@ -76,26 +54,27 @@ def evaluate(config):
             images      = batch['image'].to(device)
             gt_captions = batch['caption']
 
+            # Generate captions using Hugging Face generate
+            pred_ids = model.generate(images, max_length=max_len, num_beams=beam_size)
+            
+            # Decode predictions and ground truths
+            pred_strs = model.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+            gt_strs   = model.tokenizer.batch_decode(gt_captions, skip_special_tokens=True)
+
             for i in range(images.size(0)):
                 if max_samples is not None and done >= max_samples:
                     break
+                
+                pred_str = pred_strs[i].strip()
+                gt_str   = gt_strs[i].strip()
 
-                image    = images[i].unsqueeze(0)
-                pred_ids = generate_caption(
-                    model, image, vocab, idx2word, device,
-                    max_len=max_len,
-                    beam_size=beam_size,
-                )
-                pred_tokens = decode_ids(pred_ids, idx2word)
-                gt_ids      = gt_captions[i].tolist()
-                gt_tokens   = decode_ids(gt_ids, idx2word)
+                pred_tokens = pred_str.split()
+                gt_tokens   = gt_str.split()
 
                 hypotheses.append(pred_tokens)
                 references.append([gt_tokens])
 
-                pred_str = ' '.join(pred_tokens)
-                gt_str   = ' '.join(gt_tokens)
-                score    = rouge.score(gt_str, pred_str)
+                score = rouge.score(gt_str, pred_str)
                 rouge_scores.append(score['rougeL'].fmeasure)
 
                 done += 1
@@ -132,13 +111,10 @@ def evaluate(config):
 
 if __name__ == '__main__':
     config = {
-        'vocab_path':       'vocab.json',
+        'encoder_name':     'google/vit-base-patch16-224-in21k',
+        'decoder_name':     'gpt2',
         'checkpoint_path':  'checkpoints/best_model.pt',
         'results_path':     'eval_results.json',
-        'embed_dim':        256,
-        'num_heads':        8,
-        'num_layers':       3,
-        'ff_dim':           512,
         'max_len':          128,
         'beam_size':        5,
         'batch_size':       16,

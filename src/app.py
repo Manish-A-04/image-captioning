@@ -22,7 +22,6 @@ st.set_page_config(
 
 BASE_DIR        = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DEFAULT_CKPT    = os.path.join(BASE_DIR, 'model_training', 'checkpoints', 'best_model.pt')
-DEFAULT_VOCAB   = os.path.join(BASE_DIR, 'model_training', 'vocab.json')
 EVAL_RESULTS    = os.path.join(BASE_DIR, 'model_training', 'eval_results.json')
 SAMPLE_IMG_DIR  = os.path.join(BASE_DIR, 'data', 'raw', 'images')
 
@@ -171,54 +170,38 @@ section[data-testid="stSidebar"] {
 
 
 @st.cache_resource(show_spinner=False)
-def load_model_and_vocab(checkpoint_path, vocab_path):
+def load_model(checkpoint_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    with open(vocab_path, 'r', encoding='utf-8') as f:
-        vocab = json.load(f)
-    idx2word = {str(v): k for k, v in vocab.items()}
 
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = checkpoint.get('config', {})
 
     model = ImageCaptioningModel(
-        vocab_size=len(vocab),
-        embed_dim=cfg.get('embed_dim', 256),
-        num_heads=cfg.get('num_heads', 8),
-        num_layers=cfg.get('num_layers', 3),
-        ff_dim=cfg.get('ff_dim', 512),
-        max_len=cfg.get('max_len', 128),
-        dropout=0.0,
+        encoder_name=cfg.get('encoder_name', "google/vit-base-patch16-224-in21k"),
+        decoder_name=cfg.get('decoder_name', "gpt2")
     ).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    return model, vocab, idx2word, device, cfg
+    return model, device, cfg
 
 
 def get_transform():
     return transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ])
 
 
-def run_caption(model, vocab, idx2word, device, pil_image, beam_size, max_len):
+def run_caption(model, device, pil_image, beam_size, max_len):
     transform    = get_transform()
     image_tensor = transform(pil_image.convert('RGB')).unsqueeze(0).to(device)
 
     t0       = time.time()
-    token_ids = generate_caption(model, image_tensor, vocab, idx2word, device,
-                                  max_len=max_len, beam_size=beam_size)
+    caption  = generate_caption(model, image_tensor, device, max_len=max_len, beam_size=beam_size)
     elapsed  = time.time() - t0
 
-    special = {'<PAD>', '<SOS>', '<EOS>', '<UNK>'}
-    caption = ' '.join(
-        idx2word.get(str(tid), '<UNK>')
-        for tid in token_ids
-        if idx2word.get(str(tid), '') not in special
-    )
     return caption, elapsed
 
 
@@ -231,7 +214,6 @@ with st.sidebar:
     st.markdown("---")
 
     ckpt_path  = st.text_input("Checkpoint path", value=DEFAULT_CKPT)
-    vocab_path = st.text_input("Vocabulary path",  value=DEFAULT_VOCAB)
 
     st.markdown("### Decoding")
     beam_size = st.slider("Beam size",  min_value=1, max_value=10, value=5)
@@ -239,7 +221,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    model_ok = os.path.isfile(ckpt_path) and os.path.isfile(vocab_path)
+    model_ok = os.path.isfile(ckpt_path)
     if model_ok:
         st.markdown('<span class="badge-online"></span> **Model ready**', unsafe_allow_html=True)
     else:
@@ -269,12 +251,12 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-model = vocab = idx2word = device = cfg = None
+model = device = cfg = None
 
 if model_ok:
     try:
         with st.spinner("Loading model..."):
-            model, vocab, idx2word, device, cfg = load_model_and_vocab(ckpt_path, vocab_path)
+            model, device, cfg = load_model(ckpt_path)
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         model_ok = False
@@ -343,7 +325,7 @@ with left_col:
             else:
                 with st.spinner("Generating..."):
                     caption, elapsed = run_caption(
-                        model, vocab, idx2word, device, pil_image,
+                        model, device, pil_image,
                         beam_size=beam_size, max_len=max_len,
                     )
 
@@ -390,16 +372,13 @@ with right_col:
 
     if cfg:
         device_str = 'CUDA' if torch.cuda.is_available() else 'CPU'
+        encoder = cfg.get('encoder_name', 'ViT')
+        decoder = cfg.get('decoder_name', 'GPT-2')
         st.markdown(f"""
 <div class="metric-row">
-  <div class="metric-pill">Encoder <span>ResNet-50</span></div>
-  <div class="metric-pill">Decoder <span>Transformer</span></div>
+  <div class="metric-pill">Encoder <span>{encoder}</span></div>
+  <div class="metric-pill">Decoder <span>{decoder}</span></div>
   <div class="metric-pill">Device <span>{device_str}</span></div>
-  <div class="metric-pill">Embed dim <span>{cfg.get('embed_dim', 256)}</span></div>
-  <div class="metric-pill">Layers <span>{cfg.get('num_layers', 3)}</span></div>
-  <div class="metric-pill">Heads <span>{cfg.get('num_heads', 8)}</span></div>
-  <div class="metric-pill">FF dim <span>{cfg.get('ff_dim', 512)}</span></div>
-  <div class="metric-pill">Vocab <span>{len(vocab):,}</span></div>
 </div>
 """, unsafe_allow_html=True)
     elif model_ok:

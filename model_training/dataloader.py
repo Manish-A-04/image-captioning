@@ -4,11 +4,13 @@ import random
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
+from transformers import GPT2Tokenizer
 
 from dataset import ImageCaptionDataset
 
 
 def get_train_transform():
+    # ViT expects mean=[0.5, 0.5, 0.5] and std=[0.5, 0.5, 0.5]
     return transforms.Compose([
         transforms.Resize((256, 256)),
         transforms.RandomCrop((224, 224)),
@@ -21,8 +23,8 @@ def get_train_transform():
         ),
         transforms.ToTensor(),
         transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
+            mean=[0.5, 0.5, 0.5],
+            std=[0.5, 0.5, 0.5],
         ),
     ])
 
@@ -32,26 +34,41 @@ def get_eval_transform():
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
+            mean=[0.5, 0.5, 0.5],
+            std=[0.5, 0.5, 0.5],
         ),
     ])
 
 
-def collate_fn(batch):
-    batch = [item for item in batch if item is not None]
-    if not batch:
-        return None
+class CollateWrapper:
+    def __init__(self, tokenizer, max_len=128):
+        self.tokenizer = tokenizer
+        self.max_len = max_len
 
-    images   = torch.stack([item['image']   for item in batch])
-    captions = torch.stack([item['caption'] for item in batch])
-    img_ids  = [item['img_id'] for item in batch]
+    def __call__(self, batch):
+        batch = [item for item in batch if item is not None]
+        if not batch:
+            return None
 
-    return {
-        'image':   images,
-        'caption': captions,
-        'img_id':  img_ids,
-    }
+        images = torch.stack([item['image'] for item in batch])
+        caption_texts = [item['caption_text'] for item in batch]
+        img_ids = [item['img_id'] for item in batch]
+
+        # Tokenize captions
+        encoded_captions = self.tokenizer(
+            caption_texts,
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_len,
+            return_tensors="pt"
+        )
+
+        return {
+            'image': images,
+            'caption': encoded_captions.input_ids,
+            'attention_mask': encoded_captions.attention_mask,
+            'img_id': img_ids,
+        }
 
 
 def _split_annotations(
@@ -86,9 +103,6 @@ def get_dataloaders(config):
         data = json.load(f)
     annotations = data['annotations']
 
-    with open(config['vocab_path'], 'r', encoding='utf-8') as f:
-        vocab = json.load(f)
-
     split_ratios = config.get('split_ratios', (0.70, 0.10, 0.20))
     seed         = config.get('seed', 42)
     train_anns, val_anns, _ = _split_annotations(annotations, split_ratios, seed)
@@ -101,20 +115,22 @@ def get_dataloaders(config):
     batch_size   = config['batch_size']
     pin_memory   = torch.cuda.is_available()
 
+    tokenizer = GPT2Tokenizer.from_pretrained(config.get("decoder_name", "gpt2"))
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    collate_fn = CollateWrapper(tokenizer, max_len=max_len)
+
     train_ds = ImageCaptionDataset(
         annotations=train_anns,
         image_dir=image_dir,
-        vocab=vocab,
         transform=get_train_transform() if augment else get_eval_transform(),
-        max_len=max_len,
         caption_mode=caption_mode,
     )
     val_ds = ImageCaptionDataset(
         annotations=val_anns,
         image_dir=image_dir,
-        vocab=vocab,
         transform=get_eval_transform(),
-        max_len=max_len,
         caption_mode='first',
     )
 
@@ -148,9 +164,6 @@ def get_test_dataloader(config):
         data = json.load(f)
     annotations = data['annotations']
 
-    with open(config['vocab_path'], 'r', encoding='utf-8') as f:
-        vocab = json.load(f)
-
     split_ratios = config.get('split_ratios', (0.70, 0.10, 0.20))
     seed         = config.get('seed', 42)
     _, _, test_anns = _split_annotations(annotations, split_ratios, seed)
@@ -161,12 +174,16 @@ def get_test_dataloader(config):
     batch_size  = config.get('batch_size', 16)
     pin_memory  = torch.cuda.is_available()
 
+    tokenizer = GPT2Tokenizer.from_pretrained(config.get("decoder_name", "gpt2"))
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    collate_fn = CollateWrapper(tokenizer, max_len=max_len)
+
     test_ds = ImageCaptionDataset(
         annotations=test_anns,
         image_dir=image_dir,
-        vocab=vocab,
         transform=get_eval_transform(),
-        max_len=max_len,
         caption_mode='first',
     )
 
