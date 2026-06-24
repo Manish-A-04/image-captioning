@@ -130,6 +130,8 @@ checkpointsv*/
 *.npy
 *.npz
 
+data/
+
 # Project-specific caches & dynamic data files
 translation_cache.json
 translate.py
